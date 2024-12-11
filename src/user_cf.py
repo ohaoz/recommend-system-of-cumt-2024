@@ -39,6 +39,18 @@ class UserCF:
         n_users = normalized_matrix.shape[0]
         
         print("\n开始计算用户相似度...")
+        
+        # 计算IDF权重
+        n_users_per_item = np.array((normalized_matrix != 0).sum(axis=0)).ravel()
+        idf = np.log(n_users / (n_users_per_item + 1))
+        
+        # 应用IDF权重到评分矩阵
+        weighted_matrix = normalized_matrix.copy()
+        weighted_matrix = weighted_matrix.multiply(idf.reshape(1, -1)).tocsr()
+        
+        # 计算用户评分数量
+        user_ratings_count = np.array(weighted_matrix.getnnz(axis=1)).reshape(-1, 1)
+        
         # 分批处理以节省内存
         for start in range(0, n_users, batch_size):
             end = min(start + batch_size, n_users)
@@ -46,8 +58,8 @@ class UserCF:
                 print(f"处理用户批次 {start+1}-{end}/{n_users}")
             
             # 获取当前批次数据
-            batch_matrix = normalized_matrix[start:end].toarray()
-            batch_norms = np.linalg.norm(batch_matrix, axis=1)
+            batch_matrix = weighted_matrix[start:end].toarray()
+            batch_counts = user_ratings_count[start:end]
             
             # 初始化当前批次的top-k
             for i in range(end - start):
@@ -60,17 +72,31 @@ class UserCF:
                 j_end = min(j + batch_size, n_users)
                 
                 # 获取另一批次数据
-                other_matrix = normalized_matrix[j:j_end].toarray()
-                other_norms = np.linalg.norm(other_matrix, axis=1)
+                other_matrix = weighted_matrix[j:j_end].toarray()
+                other_counts = user_ratings_count[j:j_end]
                 
-                # 计算点积
-                similarities = np.dot(batch_matrix, other_matrix.T)
+                # 计算Pearson相关系数
+                mean_batch = np.mean(batch_matrix, axis=1, keepdims=True)
+                mean_other = np.mean(other_matrix, axis=1, keepdims=True)
                 
-                # 标准化相似度（避免除零）
-                norms_outer = np.outer(batch_norms, other_norms)
-                mask = norms_outer > 1e-8
-                similarities[mask] = similarities[mask] / norms_outer[mask]
-                similarities[~mask] = 0
+                centered_batch = batch_matrix - mean_batch
+                centered_other = other_matrix - mean_other
+                
+                # 计算相关系数
+                numerator = np.dot(centered_batch, centered_other.T)
+                denominator = np.outer(
+                    np.sqrt(np.sum(centered_batch**2, axis=1)),
+                    np.sqrt(np.sum(centered_other**2, axis=1))
+                )
+                
+                # 避免除零
+                mask = denominator > 1e-8
+                similarities = np.zeros_like(numerator)
+                similarities[mask] = numerator[mask] / denominator[mask]
+                
+                # 添加评分数量惩罚项
+                rating_penalty = np.minimum(batch_counts, other_counts.T) / np.maximum(batch_counts, other_counts.T)
+                similarities *= np.sqrt(rating_penalty)
                 
                 # 更新每个用户的top-k
                 for i in range(end - start):
@@ -88,17 +114,16 @@ class UserCF:
                         for idx in top_indices:
                             if user_sims[idx] > -np.inf:
                                 self.top_similar_users[user_id].append(j + idx)
-                                self.top_similarities[user_id].append(float(user_sims[idx]))  # 确保转换为Python float
+                                self.top_similarities[user_id].append(float(user_sims[idx]))
                     else:
                         # 更新现有top-k
                         current_min = min(self.top_similarities[user_id])
                         better_indices = np.where(user_sims > current_min)[0]
                         for idx in better_indices:
                             if user_sims[idx] > -np.inf:
-                                # 替换最小值
                                 min_idx = np.argmin(self.top_similarities[user_id])
                                 self.top_similar_users[user_id][min_idx] = j + idx
-                                self.top_similarities[user_id][min_idx] = float(user_sims[idx])  # 确保转换为Python float
+                                self.top_similarities[user_id][min_idx] = float(user_sims[idx])
             
             if (start // batch_size + 1) % 10 == 0:
                 print(f"已完成 {end}/{n_users} 个用户的相似度计算...")
@@ -141,12 +166,21 @@ class UserCF:
         relevant_similarities = similarities[rated_mask]
         relevant_ratings = neighbor_ratings[rated_mask]
         
-        # 预测评分
-        prediction = (np.dot(relevant_ratings, relevant_similarities) / 
-                     np.sum(relevant_similarities))
+        # 添加置信度权重
+        confidence_weights = 1 / (1 + np.exp(-len(relevant_ratings)))
         
-        # 加回用户均值
-        if self.user_means is not None:
-            prediction += self.user_means[user_id]
+        # 计算预测评分
+        weighted_sum = np.sum(relevant_ratings * relevant_similarities * confidence_weights)
+        similarity_sum = np.sum(np.abs(relevant_similarities) * confidence_weights)
         
+        if similarity_sum > 0:
+            base_pred = weighted_sum / similarity_sum
+        else:
+            base_pred = self.user_means[user_id] if self.user_means is not None else 3.0
+        
+        # 考虑评分分布
+        user_mean = np.mean(relevant_ratings)
+        prediction = 0.7 * base_pred + 0.3 * user_mean
+        
+        # 确保预测值在合理范围内
         return np.clip(prediction, 1, 5)

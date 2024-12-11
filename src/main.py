@@ -76,12 +76,20 @@ def evaluate_model(model, test_matrix, n_users=1000):
     
     mae_sum = 0.0
     rmse_sum = 0.0
+    precision_sum = 0.0
+    recall_sum = 0.0
+    ndcg_sum = 0.0
+    diversity_sum = 0.0
     count = 0
     valid_users = 0
     
     test_users = np.random.choice(test_matrix.shape[0], size=n_users, replace=False)
     total_predictions = 0
     valid_predictions = 0
+    
+    # 用于计算覆盖率
+    recommended_items = set()
+    total_items = set(range(test_matrix.shape[1]))
     
     for i, user_id in enumerate(test_users):
         # 获取该用户的实际评分
@@ -102,19 +110,50 @@ def evaluate_model(model, test_matrix, n_users=1000):
                     user_predictions.append(pred)
                     user_actuals.append(actual_ratings[item_id])
                     valid_predictions += 1
+                    recommended_items.add(item_id)
             except Exception as e:
-                log_progress(f"预测错误 - 用户: {user_id}, 物品: {item_id}, 错误: {str(e)}")
                 continue
         
         if len(user_predictions) > 0:
-            # 计算误差
+            # 计算基本误差指标
             user_predictions = np.array(user_predictions)
             user_actuals = np.array(user_actuals)
             errors = np.abs(user_predictions - user_actuals)
             
             mae_sum += np.sum(errors)
             rmse_sum += np.sum(errors ** 2)
-            count += len(user_predictions)
+            
+            # 计算准确率和召回率
+            threshold = 3.5  # 认为评分大于3.5的为"喜欢"
+            actual_liked = user_actuals >= threshold
+            pred_liked = user_predictions >= threshold
+            
+            if np.sum(pred_liked) > 0:
+                precision = np.sum(actual_liked & pred_liked) / np.sum(pred_liked)
+                precision_sum += precision
+            
+            if np.sum(actual_liked) > 0:
+                recall = np.sum(actual_liked & pred_liked) / np.sum(actual_liked)
+                recall_sum += recall
+            
+            # 计算NDCG@10
+            k = min(10, len(user_predictions))
+            sorted_indices = np.argsort(-user_predictions)[:k]
+            dcg = np.sum(user_actuals[sorted_indices] / np.log2(np.arange(2, k + 2)))
+            
+            ideal_sorted_indices = np.argsort(-user_actuals)[:k]
+            idcg = np.sum(user_actuals[ideal_sorted_indices] / np.log2(np.arange(2, k + 2)))
+            
+            if idcg > 0:
+                ndcg = dcg / idcg
+                ndcg_sum += ndcg
+            
+            # 计算推荐多样性
+            unique_items = len(set(np.where(user_predictions >= threshold)[0]))
+            diversity = unique_items / len(user_predictions)
+            diversity_sum += diversity
+            
+            count += 1
             valid_users += 1
         
         total_predictions += len(rated_items)
@@ -125,23 +164,41 @@ def evaluate_model(model, test_matrix, n_users=1000):
     if count > 0:
         mae = mae_sum / count
         rmse = np.sqrt(rmse_sum / count)
+        precision = precision_sum / count
+        recall = recall_sum / count
+        ndcg = ndcg_sum / count
+        diversity = diversity_sum / count
+        coverage = len(recommended_items) / len(total_items)
+        
         log_progress(f"评估完成 - 有效用户: {valid_users}/{n_users}, 有效预测: {valid_predictions}/{total_predictions}")
     else:
-        mae = np.nan
-        rmse = np.nan
+        mae = rmse = precision = recall = ndcg = diversity = coverage = np.nan
         log_progress("警告: 没有有效的预测结果!")
     
     log_progress("评估完成", start_time)
-    return mae, rmse, valid_predictions, total_predictions
+    return {
+        'mae': mae,
+        'rmse': rmse,
+        'precision': precision,
+        'recall': recall,
+        'f1': 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0,
+        'ndcg': ndcg,
+        'diversity': diversity,
+        'coverage': coverage,
+        'valid_predictions': valid_predictions,
+        'total_predictions': total_predictions
+    }
 
 def main():
     total_start_time = time.time()
     log_progress("开始推荐系统评估...")
     
-    # 大幅减少数据规模
-    sample_users = 1000   # 只采样1000个用户
-    min_ratings = 20      # 每个用户至少20个评分，确保数据质量
-    batch_size = 100      # 减小批处理大小，降低内存使用
+    # 调整数据规模和参数
+    sample_users = 1000    # 采样用户数
+    min_ratings = 20       # 每个用户最少评分数
+    batch_size = 100      # 批处理大小
+    n_neighbors = 30      # 增加邻居数量以提高覆盖率
+    n_eval_users = 50     # 增加评估用户数量
     
     # 修正数据文件路径
     ratings_path = '../ml-32m/ml-32m/ratings.csv'
@@ -162,36 +219,53 @@ def main():
     log_progress(f"训练集非零元素: {train_matrix.nnz}, 稀疏度: {train_matrix.nnz/(train_matrix.shape[0]*train_matrix.shape[1])*100:.4f}%")
     log_progress(f"测试集非零元素: {test_matrix.nnz}, 稀疏度: {test_matrix.nnz/(test_matrix.shape[0]*test_matrix.shape[1])*100:.4f}%")
     
-    # 减少评估用户数量
-    n_eval_users = 20  # 只评估20个用户
-    
     # 评估基于用户的协同过滤
     log_progress("\n开始基于用户的协同过滤评估...")
-    user_cf = UserCF(n_neighbors=5)  # 减少邻居数量
+    user_cf = UserCF(n_neighbors=n_neighbors)
     user_start_time = time.time()
     user_cf.fit(train_matrix)
-    user_mae, user_rmse, user_valid, user_total = evaluate_model(user_cf, test_matrix, n_users=n_eval_users)
+    user_metrics = evaluate_model(user_cf, test_matrix, n_users=n_eval_users)
     user_time = time.time() - user_start_time
     
     log_progress("\n基于用户的协同过滤结果:")
-    print(f"MAE: {user_mae:.4f}")
-    print(f"RMSE: {user_rmse:.4f}")
-    print(f"有效预测率: {user_valid}/{user_total} ({user_valid/user_total*100:.2f}%)")
+    print(f"MAE: {user_metrics['mae']:.4f}")
+    print(f"RMSE: {user_metrics['rmse']:.4f}")
+    print(f"准确率: {user_metrics['precision']:.4f}")
+    print(f"召回率: {user_metrics['recall']:.4f}")
+    print(f"F1分数: {user_metrics['f1']:.4f}")
+    print(f"NDCG@10: {user_metrics['ndcg']:.4f}")
+    print(f"多样性: {user_metrics['diversity']:.4f}")
+    print(f"覆盖率: {user_metrics['coverage']:.4f}")
+    print(f"有效预测率: {user_metrics['valid_predictions']}/{user_metrics['total_predictions']} ({user_metrics['valid_predictions']/user_metrics['total_predictions']*100:.2f}%)")
     print(f"耗时: {user_time/60:.2f}分钟")
     
     # 评估基于物品的协同过滤
     log_progress("\n开始基于物品的协同过滤评估...")
-    item_cf = ItemCF(n_neighbors=5)  # 减少邻居数量
+    item_cf = ItemCF(n_neighbors=n_neighbors)
     item_start_time = time.time()
     item_cf.fit(train_matrix)
-    item_mae, item_rmse, item_valid, item_total = evaluate_model(item_cf, test_matrix, n_users=n_eval_users)
+    item_metrics = evaluate_model(item_cf, test_matrix, n_users=n_eval_users)
     item_time = time.time() - item_start_time
     
     log_progress("\n基于物品的协同过滤结果:")
-    print(f"MAE: {item_mae:.4f}")
-    print(f"RMSE: {item_rmse:.4f}")
-    print(f"有效预测率: {item_valid}/{item_total} ({item_valid/item_total*100:.2f}%)")
+    print(f"MAE: {item_metrics['mae']:.4f}")
+    print(f"RMSE: {item_metrics['rmse']:.4f}")
+    print(f"准确率: {item_metrics['precision']:.4f}")
+    print(f"召回率: {item_metrics['recall']:.4f}")
+    print(f"F1分数: {item_metrics['f1']:.4f}")
+    print(f"NDCG@10: {item_metrics['ndcg']:.4f}")
+    print(f"多样性: {item_metrics['diversity']:.4f}")
+    print(f"覆盖率: {item_metrics['coverage']:.4f}")
+    print(f"有效预测率: {item_metrics['valid_predictions']}/{item_metrics['total_predictions']} ({item_metrics['valid_predictions']/item_metrics['total_predictions']*100:.2f}%)")
     print(f"耗时: {item_time/60:.2f}分钟")
+    
+    # 输出比较结果
+    log_progress("\n算法比较:")
+    metrics = ['mae', 'rmse', 'precision', 'recall', 'f1', 'ndcg', 'diversity', 'coverage']
+    print("\n指标\t\tUserCF\t\tItemCF")
+    print("-" * 50)
+    for metric in metrics:
+        print(f"{metric.upper()}\t\t{user_metrics[metric]:.4f}\t\t{item_metrics[metric]:.4f}")
     
     log_progress("\n评估完成", total_start_time)
 
