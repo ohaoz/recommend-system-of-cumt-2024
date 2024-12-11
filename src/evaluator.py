@@ -7,34 +7,24 @@ class Evaluator:
         """初始化评估器"""
         self.metrics = {}
         
-    def evaluate(self, y_true, y_pred):
-        """评估预测结果
+    def evaluate(self, model, test_data):
+        """评估推荐算法性能"""
+        # 计算准确率、召回率等指标
+        precision = self._calculate_precision(model, test_data)
+        recall = self._calculate_recall(model, test_data)
         
-        Args:
-            y_true (array-like): 真实评分
-            y_pred (array-like): 预测评分
-            
-        Returns:
-            dict: 评估指标
-        """
-        # 计算MAE
-        mae = mean_absolute_error(y_true, y_pred)
-        
-        # 计算RMSE
-        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        
-        # 计算准确率（将评分四舍五入到最近的0.5，计算完全匹配的比例）
-        y_true_rounded = np.round(y_true * 2) / 2
-        y_pred_rounded = np.round(y_pred * 2) / 2
-        accuracy = np.mean(y_true_rounded == y_pred_rounded)
-        
-        self.metrics = {
-            'MAE': mae,
-            'RMSE': rmse,
-            'Accuracy': accuracy
+        return {
+            'precision': precision,
+            'recall': recall
         }
         
-        return self.metrics
+    def _calculate_precision(self, model, test_data):
+        # 实现准确率计算
+        pass
+        
+    def _calculate_recall(self, model, test_data):
+        # 实现召回率计算
+        pass
     
     def plot_prediction_distribution(self, y_true, y_pred):
         """绘制预测值与真实值的分布对比图

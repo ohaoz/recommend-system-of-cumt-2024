@@ -1,80 +1,72 @@
-# 协同过滤推荐系统
+# 推荐系统算法实现
 
-基于MovieLens数据集实现的协同过滤推荐系统，包含基于用户和基于物品的两种方法。
-
-## 功能特点
-
-1. **算法实现**
-   - 基于用户的协同过滤(UserCF)
-   - 基于物品的协同过滤(ItemCF)
-   - IDF权重优化
-   - 评分惩罚机制
-
-2. **评估指标**
-   - MAE (平均绝对误差)
-   - RMSE (均方根误差)
-   - 准确率(Precision)
-   - 召回率(Recall)
-   - F1分数
-   - NDCG@10
-   - 多样性(Diversity)
-   - 覆盖率(Coverage)
-
-3. **性能优化**
-   - 批处理计算
-   - 稀疏矩阵优化
-   - 内存使用优化
+本项目实现了多种推荐系统算法，包括基于用户的协同过滤(UserCF)、基于物品的协同过滤(ItemCF)、基于用户画像的协同过滤(UserProfileCF)和基于时间的协同过滤(TimeAwareCF)。
 
 ## 项目结构
 
 ```
-recommend/
-├── data/                # 数据目录
-├── src/                 # 源代码
-│   ├── main.py         # 主程序
-│   ├── user_cf.py      # 基于用户的协同过滤
-│   ├── item_cf.py      # 基于物品的协同过滤
-│   └── data_processor.py# 数据处理
-└── README.md           # 项目说明
+src/
+├── main.py              # 主程序入口
+├── data_processor.py    # 数据预处理
+├── user_cf.py          # 基于用户的协同过滤
+├── item_cf.py          # 基于物品的协同过滤
+├── user_profile_cf.py  # 基于用户画像的协同过滤
+└── time_aware_cf.py    # 基于时间的协同过滤
+```
+
+## 环境要求
+
+- Python 3.7+
+- NumPy
+- SciPy
+- Pandas
+- Scikit-learn
+- Matplotlib
+- Seaborn
+
+## 安装依赖
+
+```bash
+pip install -r requirements.txt
 ```
 
 ## 使用方法
 
-1. **环境准备**
+1. 准备数据集
+   - 将MovieLens数据集放在`data/`目录下
+   - 支持ml-100k、ml-1m等格式
+
+2. 运行程序
    ```bash
-   pip install numpy pandas scipy scikit-learn
+   python src/main.py
    ```
 
-2. **运行程序**
-   ```bash
-   cd src
-   python main.py
-   ```
+3. 查看结果
+   - 评估指标将打印在控制台
+   - 可视化结果保存在`plots/`目录下
 
-## 实验结果
+## 评估指标
 
-### UserCF vs ItemCF
+- MAE (平均绝对误差)
+- RMSE (均方根误差)
+- Precision (准确率)
+- Recall (召回率)
+- F1 Score (F1分数)
+- NDCG@10
+- Coverage (覆盖率)
+- Training Time (训练时间)
 
-指标 | UserCF | ItemCF
---- | --- | ---
-MAE | 22.44 | 24.43
-RMSE | 5.35 | 5.67
-Precision | 0.74 | 0.73
-Recall | 0.76 | 0.67
-F1 | 0.75 | 0.70
-NDCG | 0.90 | 0.90
-Diversity | 0.72 | 0.63
-Coverage | 0.13 | 0.15
+## 可视化结果
+
+- accuracy_comparison.png: 准确性指标对比
+- quality_metrics.png: 推荐质量指标对比
+- ndcg_coverage.png: NDCG和覆盖率对比
+- training_time.png: 训练时间对比
+- metrics_heatmap.png: 性能指标热力图
+- radar_chart.png: 算法性能雷达图
 
 ## 注意事项
 
-1. 数据集较大，建议使用足够的内存
-2. 可以通过调整参数优化性能
-3. 推荐根据实际需求选择合适的算法
-
-## 未来改进
-
-1. 添加更多评估指标
-2. 实现混合推荐策略
-3. 优化计算效率
-4. 添加更多特征工程
+1. 数据集文件未包含在代码仓库中，需要自行下载
+2. 建议使用虚拟环境运行程序
+3. 首次运行可能需要较长时间进行数据处理和模型训练

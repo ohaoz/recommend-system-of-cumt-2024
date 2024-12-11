@@ -1,186 +1,105 @@
-import numpy as np
+import numpy as np 
 from scipy.sparse import csr_matrix
 import warnings
-import time
 from sklearn.metrics.pairwise import cosine_similarity
-from multiprocessing import cpu_count
+from multiprocessing import Pool, cpu_count
 
 warnings.filterwarnings('ignore')
 
 class UserCF:
-    def __init__(self, n_neighbors=10, similarity_metric='cosine', use_gpu=False):
+    def __init__(self, n_neighbors=20, min_support=5):
         self.n_neighbors = n_neighbors
-        self.similarity_metric = similarity_metric
-        self.user_item_matrix = None
+        self.min_support = min_support
         self.user_means = None
-        self.top_similar_users = {}
-        self.top_similarities = {}
-    
-    def _normalize_ratings(self, ratings):
-        """对用户评分进行归一化处理"""
-        print("计算用户平均评分...")
-        ratings_sum = np.array(ratings.sum(axis=1)).ravel()
-        ratings_count = np.array(ratings.getnnz(axis=1))
+        self.item_means = None
+        self.global_mean = None
         
-        self.user_means = np.zeros(ratings.shape[0])
-        mask = ratings_count > 0
-        self.user_means[mask] = ratings_sum[mask] / ratings_count[mask]
+    def fit(self, train_matrix):
+        self.train_matrix = train_matrix
+        self.n_users, self.n_items = train_matrix.shape
         
-        print("创建归一化矩阵...")
-        normalized = ratings.copy()
+        # 计算全局平均分和用户/物品偏置
+        self._compute_baselines()
+        
+        # 计算归一化矩阵
+        normalized_matrix = self._normalize_matrix()
+        
+        # 计算用户相似度
+        self.user_similarity = self._compute_similarity(normalized_matrix)
+
+    def _compute_baselines(self):
+        # 计算全局平均分
+        self.global_mean = self.train_matrix.data.mean()
+        
+        # 计算用户偏置
+        self.user_means = np.zeros(self.n_users)
+        for u in range(self.n_users):
+            user_ratings = self.train_matrix[u].data
+            if len(user_ratings) > 0:
+                self.user_means[u] = user_ratings.mean() - self.global_mean
+            
+        # 计算物品偏置
+        self.item_means = np.zeros(self.n_items)
+        for i in range(self.n_items):
+            item_ratings = self.train_matrix[:,i].data
+            if len(item_ratings) > 0:
+                self.item_means[i] = item_ratings.mean() - self.global_mean
+
+    def _normalize_matrix(self):
+        normalized = self.train_matrix.copy()
         rows, cols = normalized.nonzero()
-        normalized.data = normalized.data - self.user_means[rows]
         
-        print("归一化完成!")
+        # 减去基准预测值
+        normalized.data = normalized.data - (self.global_mean + 
+                                          self.user_means[rows] + 
+                                          self.item_means[cols])
         return normalized
 
-    def _compute_similarity(self, normalized_matrix, batch_size=100):
-        """使用CPU计算用户相似度"""
-        n_users = normalized_matrix.shape[0]
+    def _compute_similarity(self, normalized_matrix):
+        """计算用户相似度矩阵"""
+        # 使用余弦相似度直接计算
+        similarity = cosine_similarity(normalized_matrix)
         
-        print("\n开始计算用户相似度...")
+        # 将对角线（自相似度）设为0
+        np.fill_diagonal(similarity, 0)
         
-        # 计算IDF权重
-        n_users_per_item = np.array((normalized_matrix != 0).sum(axis=0)).ravel()
-        idf = np.log(n_users / (n_users_per_item + 1))
+        return similarity
         
-        # 应用IDF权重到评分矩阵
-        weighted_matrix = normalized_matrix.copy()
-        weighted_matrix = weighted_matrix.multiply(idf.reshape(1, -1)).tocsr()
-        
-        # 计算用户评分数量
-        user_ratings_count = np.array(weighted_matrix.getnnz(axis=1)).reshape(-1, 1)
-        
-        # 分批处理以节省内存
-        for start in range(0, n_users, batch_size):
-            end = min(start + batch_size, n_users)
-            if start == 0:
-                print(f"处理用户批次 {start+1}-{end}/{n_users}")
-            
-            # 获取当前批次数据
-            batch_matrix = weighted_matrix[start:end].toarray()
-            batch_counts = user_ratings_count[start:end]
-            
-            # 初始化当前批次的top-k
-            for i in range(end - start):
-                user_id = start + i
-                self.top_similar_users[user_id] = []
-                self.top_similarities[user_id] = []
-            
-            # 分块计算相似度
-            for j in range(0, n_users, batch_size):
-                j_end = min(j + batch_size, n_users)
-                
-                # 获取另一批次数据
-                other_matrix = weighted_matrix[j:j_end].toarray()
-                other_counts = user_ratings_count[j:j_end]
-                
-                # 计算Pearson相关系数
-                mean_batch = np.mean(batch_matrix, axis=1, keepdims=True)
-                mean_other = np.mean(other_matrix, axis=1, keepdims=True)
-                
-                centered_batch = batch_matrix - mean_batch
-                centered_other = other_matrix - mean_other
-                
-                # 计算相关系数
-                numerator = np.dot(centered_batch, centered_other.T)
-                denominator = np.outer(
-                    np.sqrt(np.sum(centered_batch**2, axis=1)),
-                    np.sqrt(np.sum(centered_other**2, axis=1))
-                )
-                
-                # 避免除零
-                mask = denominator > 1e-8
-                similarities = np.zeros_like(numerator)
-                similarities[mask] = numerator[mask] / denominator[mask]
-                
-                # 添加评分数量惩罚项
-                rating_penalty = np.minimum(batch_counts, other_counts.T) / np.maximum(batch_counts, other_counts.T)
-                similarities *= np.sqrt(rating_penalty)
-                
-                # 更新每个用户的top-k
-                for i in range(end - start):
-                    user_id = start + i
-                    user_sims = similarities[i]
-                    
-                    # 排除自身
-                    if start + i >= j and start + i < j_end:
-                        user_sims[start + i - j] = -np.inf
-                    
-                    # 找出当前批次中的top-k
-                    if len(self.top_similar_users[user_id]) < self.n_neighbors:
-                        # 初始填充
-                        top_indices = np.argsort(user_sims)[-self.n_neighbors:]
-                        for idx in top_indices:
-                            if user_sims[idx] > -np.inf:
-                                self.top_similar_users[user_id].append(j + idx)
-                                self.top_similarities[user_id].append(float(user_sims[idx]))
-                    else:
-                        # 更新现有top-k
-                        current_min = min(self.top_similarities[user_id])
-                        better_indices = np.where(user_sims > current_min)[0]
-                        for idx in better_indices:
-                            if user_sims[idx] > -np.inf:
-                                min_idx = np.argmin(self.top_similarities[user_id])
-                                self.top_similar_users[user_id][min_idx] = j + idx
-                                self.top_similarities[user_id][min_idx] = float(user_sims[idx])
-            
-            if (start // batch_size + 1) % 10 == 0:
-                print(f"已完成 {end}/{n_users} 个用户的相似度计算...")
-
-    def fit(self, user_item_matrix):
-        """训练模型"""
-        print(f"开始处理用户-物品矩阵 (shape: {user_item_matrix.shape})...")
-        print(f"非零元素数量: {user_item_matrix.nnz}")
-        print(f"矩阵稀疏度: {user_item_matrix.nnz / (user_item_matrix.shape[0] * user_item_matrix.shape[1]):.4%}")
-        
-        print("\n正在归一化用户评分...")
-        self.user_item_matrix = user_item_matrix
-        normalized_matrix = self._normalize_ratings(user_item_matrix)
-        
-        print("\n正在计算用户相似度...")
-        start_time = time.time()
-        self._compute_similarity(normalized_matrix)
-        end_time = time.time()
-        print(f"\n相似度计算完成! 总耗时: {(end_time-start_time)/60:.2f} 分钟")
-
     def predict(self, user_id, item_id):
         """预测用户对物品的评分"""
-        if user_id not in self.top_similar_users:
-            return self.user_means[user_id] if self.user_means is not None else 3.0
-
-        # 获取相似用户及其相似度
-        similar_users = np.array(self.top_similar_users[user_id])
-        similarities = np.array(self.top_similarities[user_id])
+        # 如果用户已经对该物品评分，直接返回已有评分
+        if self.train_matrix[user_id, item_id] != 0:
+            return self.train_matrix[user_id, item_id]
         
-        # 获取相似用户对目标物品的评分
-        neighbor_ratings = self.user_item_matrix[similar_users, item_id].toarray().ravel()
+        # 获取评分过该物品的用户列表
+        rated_users = self.train_matrix[:, item_id].nonzero()[0]
         
-        # 找出有评分的用户
-        rated_mask = neighbor_ratings > 0
+        # 如果没有用户评价过该物品，返回全局平均分
+        if len(rated_users) == 0:
+            return np.clip(self.global_mean, 1, 5)
         
-        if np.sum(rated_mask) == 0:
-            return self.user_means[user_id] if self.user_means is not None else 3.0
+        # 计算与这些用户的相似度
+        similarities = self.user_similarity[user_id, rated_users]
         
-        # 计算加权平均评分
-        relevant_similarities = similarities[rated_mask]
-        relevant_ratings = neighbor_ratings[rated_mask]
+        # 选择相似度最高的N个用户
+        top_n_idx = np.argsort(similarities)[-self.n_neighbors:]
+        similar_users = rated_users[top_n_idx]
+        sim_weights = similarities[top_n_idx]
         
-        # 添加置信度权重
-        confidence_weights = 1 / (1 + np.exp(-len(relevant_ratings)))
+        # 过滤掉相似度为0或负数的用户
+        mask = sim_weights > 0
+        similar_users = similar_users[mask]
+        sim_weights = sim_weights[mask]
         
-        # 计算预测评分
-        weighted_sum = np.sum(relevant_ratings * relevant_similarities * confidence_weights)
-        similarity_sum = np.sum(np.abs(relevant_similarities) * confidence_weights)
+        # 如果没有足够的相似用户，返回物品平均分
+        if len(similar_users) < self.min_support:
+            item_mean = np.mean(self.train_matrix[:, item_id].data)
+            return np.clip(item_mean, 1, 5)
         
-        if similarity_sum > 0:
-            base_pred = weighted_sum / similarity_sum
-        else:
-            base_pred = self.user_means[user_id] if self.user_means is not None else 3.0
+        # 获取相似用户对该物品的评分
+        ratings = np.array([self.train_matrix[u, item_id] for u in similar_users])
         
-        # 考虑评分分布
-        user_mean = np.mean(relevant_ratings)
-        prediction = 0.7 * base_pred + 0.3 * user_mean
+        # 计算加权预测评分
+        pred = np.sum(sim_weights * ratings) / np.sum(sim_weights)
         
-        # 确保预测值在合理范围内
-        return np.clip(prediction, 1, 5)
+        return np.clip(pred, 1, 5)
