@@ -1,0 +1,10 @@
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+psutil>=5.9.0
+tqdm>=4.65.0
+cupy
+cupy-cuda11x
+faiss-gpu 
