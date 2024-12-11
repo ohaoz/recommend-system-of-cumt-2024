@@ -1,2 +1,8 @@
-ml-32m/
+# MovieLens 数据集
+ml-*/ 
+ml-*.zip
+ml-*.tar.gz
+
+# 数据文件
 *.csv
+*.dat
