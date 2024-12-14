@@ -1,6 +1,0 @@
-# 忽略所有 ml-* 格式的数据集文件
-ml-* filter=lfs diff=lfs merge=lfs -text
-
-# 忽略常见的数据集文件格式
-*.csv filter=lfs diff=lfs merge=lfs -text
-*.dat filter=lfs diff=lfs merge=lfs -text
